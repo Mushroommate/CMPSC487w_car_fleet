@@ -1,5 +1,5 @@
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, messagebox, simpledialog
 import sqlite3
 from datetime import datetime, timedelta
 
@@ -12,6 +12,14 @@ class CarRental:
         self.conn = sqlite3.connect('Car_Rental.db', check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
         self.cursor = self.conn.cursor()
+
+        # Initialize pricing structure
+        self.pricing = {
+            'sedan': {'daily': 50, 'hourly': 5},
+            'SUV': {'daily': 70, 'hourly': 7},
+            'Coupe': {'daily': 60, 'hourly': 6},
+            'Truck': {'daily': 80, 'hourly': 8}
+        }
 
         self.notebook = ttk.Notebook(self.page)
         self.notebook.pack(fill=tk.BOTH, expand=True)
@@ -44,12 +52,18 @@ class CarRental:
         cleanup_button = ttk.Button(button_frame, text="Clean All Reservations", command=self.cleanup_reservations)
         cleanup_button.pack(side='left', padx=5)
 
+        extend_button = ttk.Button(button_frame, text="Extend Reservation", command=self.extend_reservation)
+        extend_button.pack(side='left', padx=5)
+
+        update_pricing_button = ttk.Button(button_frame, text="Update Pricing", command=self.update_pricing)
+        update_pricing_button.pack(side='left', padx=5)
+
         self.refresh_reservations()
 
     def setup_reservation_form(self):
         fields = [
             ("driver_id", "Driver ID:", self.drivers),
-            ("car_type", "Car Type:", ['sedan', 'SUV', 'Coupe', 'Truck']),
+            ("car_type", "Car Type:", list(self.pricing.keys())),
             ("checkout_time", "Checkout Time (YYYY-MM-DD HH:MM):", None),
             ("return_time", "Return Time (YYYY-MM-DD HH:MM):", None)
         ]
@@ -85,6 +99,22 @@ class CarRental:
         for row in self.cursor.fetchall():
             self.tree.insert('', 'end', values=tuple(row))
 
+    def calculate_price(self, car_type, checkout, return_time):
+        duration = return_time - checkout
+        days = duration.days
+        hours = duration.seconds // 3600
+        
+        daily_rate = self.pricing[car_type]['daily']
+        hourly_rate = self.pricing[car_type]['hourly']
+        
+        price = days * daily_rate + hours * hourly_rate
+        
+        # Apply discount for rentals a week or longer
+        if days >= 7:
+            price *= 0.9  # 10% discount
+        
+        return price
+
     def submit_reservation(self):
         data = {key: entry.get() for key, entry in self.entries.items()}
 
@@ -94,8 +124,12 @@ class CarRental:
         
         try:
             checkout = datetime.strptime(data['checkout_time'], "%Y-%m-%d %H:%M")
+            return_time = datetime.strptime(data['return_time'], "%Y-%m-%d %H:%M")
             if checkout < datetime.now() + timedelta(hours=24):
                 messagebox.showerror("Error", "Reservation has to be booked 24hrs prior.")
+                return
+            if return_time <= checkout:
+                messagebox.showerror("Error", "Return time must be after checkout time.")
                 return
         except ValueError:
             messagebox.showerror('Error', "Invalid format of Date and Time.")
@@ -110,8 +144,7 @@ class CarRental:
 
         car_id = available_car[0]
 
-        duration = datetime.strptime(data['return_time'], "%Y-%m-%d %H:%M") - checkout
-        price = duration.days * 100 + duration.seconds // 3600 * 5
+        price = self.calculate_price(data['car_type'], checkout, return_time)
 
         reservation_id = f"RES{datetime.now().strftime('%Y%m%d%H%M%S')}"
         
@@ -128,8 +161,89 @@ class CarRental:
             messagebox.showerror("Database Error", str(e))
             return
 
-        messagebox.showinfo("Success", "Reservation made successfully.")
+        messagebox.showinfo("Success", f"Reservation made successfully. Total price: ${price:.2f}")
         self.refresh_reservations()
+
+    def extend_reservation(self):
+        selected_item = self.tree.selection()
+        if not selected_item:
+            messagebox.showerror("Error", "Please select a reservation to extend.")
+            return
+
+        reservation_id = self.tree.item(selected_item[0])['values'][0]
+        
+        # Get current reservation details
+        self.cursor.execute("SELECT Car_id, Return_time FROM Reservations WHERE Reservation_id = ?", (reservation_id,))
+        reservation = self.cursor.fetchone()
+        if not reservation:
+            messagebox.showerror("Error", "Reservation not found.")
+            return
+
+        car_id, current_return_time = reservation
+        current_return_time = datetime.strptime(current_return_time, "%Y-%m-%d %H:%M")
+
+        # Ask for new return time
+        new_return_time_str = simpledialog.askstring("Extend Reservation", 
+                                                     "Enter new return time (YYYY-MM-DD HH:MM):",
+                                                     parent=self.page)
+        if not new_return_time_str:
+            return
+
+        try:
+            new_return_time = datetime.strptime(new_return_time_str, "%Y-%m-%d %H:%M")
+            if new_return_time <= current_return_time:
+                messagebox.showerror("Error", "New return time must be after current return time.")
+                return
+        except ValueError:
+            messagebox.showerror("Error", "Invalid date format.")
+            return
+
+        # Check if car is available for extension
+        self.cursor.execute("""
+        SELECT COUNT(*) FROM Reservations 
+        WHERE Car_id = ? AND Checkout_time < ? AND Checkout_time > ?
+        """, (car_id, new_return_time, current_return_time))
+        if self.cursor.fetchone()[0] > 0:
+            messagebox.showerror("Error", "Car is not available for the requested extension period.")
+            return
+
+        # Update reservation
+        try:
+            self.cursor.execute("""
+            UPDATE Reservations SET Return_time = ? WHERE Reservation_id = ?
+            """, (new_return_time_str, reservation_id))
+            
+            # Recalculate price
+            self.cursor.execute("SELECT Size, Checkout_time FROM Reservations WHERE Reservation_id = ?", (reservation_id,))
+            car_type, checkout_time = self.cursor.fetchone()
+            checkout_time = datetime.strptime(checkout_time, "%Y-%m-%d %H:%M")
+            new_price = self.calculate_price(car_type, checkout_time, new_return_time)
+            
+            self.cursor.execute("UPDATE Reservations SET Price = ? WHERE Reservation_id = ?", (str(new_price), reservation_id))
+            
+            self.conn.commit()
+            messagebox.showinfo("Success", f"Reservation extended successfully. New price: ${new_price:.2f}")
+            self.refresh_reservations()
+        except sqlite3.Error as e:
+            messagebox.showerror("Database Error", str(e))
+
+    def update_pricing(self):
+        for car_type in self.pricing:
+            new_daily = simpledialog.askfloat(f"Update {car_type} Pricing", 
+                                              f"Enter new daily rate for {car_type}:",
+                                              parent=self.page,
+                                              minvalue=0)
+            if new_daily is not None:
+                self.pricing[car_type]['daily'] = new_daily
+
+            new_hourly = simpledialog.askfloat(f"Update {car_type} Pricing", 
+                                               f"Enter new hourly rate for {car_type}:",
+                                               parent=self.page,
+                                               minvalue=0)
+            if new_hourly is not None:
+                self.pricing[car_type]['hourly'] = new_hourly
+
+        messagebox.showinfo("Success", "Pricing updated successfully.")
 
     def cleanup_reservations(self):
         if messagebox.askyesno("Confirm", "Are you sure you want to delete all reservations?"):
