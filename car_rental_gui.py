@@ -6,10 +6,11 @@ from datetime import datetime, timedelta
 class CarRental:
     def __init__(self, page):
         self.page = page
-        self.page.title('Reservation')
+        self.page.title('Car Rental System')
         self.page.geometry("800x600")
 
-        self.conn = sqlite3.connect('Car_Rental.db')
+        self.conn = sqlite3.connect('Car_Rental.db', check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
         self.cursor = self.conn.cursor()
 
         self.notebook = ttk.Notebook(self.page)
@@ -18,78 +19,81 @@ class CarRental:
         self.admin_frame = ttk.Frame(self.notebook)
         self.reservation_frame = ttk.Frame(self.notebook)
 
-        self.notebook.add(self.admin_frame, text='Admin Form')
+        self.notebook.add(self.admin_frame, text='Admin View')
         self.notebook.add(self.reservation_frame, text="Reservation Form")
+
+        self.drivers = self.load_drivers()
 
         self.setup_admin_view()
         self.setup_reservation_form()
 
     def setup_admin_view(self):
-        self.tree = ttk.Treeview(self.admin_frame, columns=('Reservation ID', 'Driver', 'Car', 'Checkout', 'Return', 'Price'), show='headings')
-        self.tree.heading('Reservation ID', text='Reservation ID')
-        self.tree.heading('Driver', text='Driver')
-        self.tree.heading('Car', text='Car')
-        self.tree.heading('Checkout', text='Checkout Time')
-        self.tree.heading('Return', text='Return Time')
-        self.tree.heading('Price', text='Price')
+        columns = ('Reservation ID', 'Driver', 'Car', 'Checkout', 'Return', 'Price')
+        self.tree = ttk.Treeview(self.admin_frame, columns=columns, show='headings')
+        for col in columns:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=100)
         self.tree.pack(expand=1, fill="both")
 
-        refresh_button = ttk.Button(self.admin_frame, text='Refresh', command=self.refresh_reservations)
-        refresh_button.pack()
+        button_frame = ttk.Frame(self.admin_frame)
+        button_frame.pack(fill='x', padx=5, pady=5)
+
+        refresh_button = ttk.Button(button_frame, text='Refresh', command=self.refresh_reservations)
+        refresh_button.pack(side='left', padx=5)
+
+        cleanup_button = ttk.Button(button_frame, text="Clean All Reservations", command=self.cleanup_reservations)
+        cleanup_button.pack(side='left', padx=5)
 
         self.refresh_reservations()
 
     def setup_reservation_form(self):
-        ttk.Label(self.reservation_frame, text="Driver ID:").grid(row=0, column=0, padx=5, pady=5)
-        self.driver_id = ttk.Combobox(self.reservation_frame)
-        self.driver_id.grid(row=0, column=1, padx=5, pady=5)
-        self.load_drivers()
+        fields = [
+            ("driver_id", "Driver ID:", self.drivers),
+            ("car_type", "Car Type:", ['sedan', 'SUV', 'Coupe', 'Truck']),
+            ("checkout_time", "Checkout Time (YYYY-MM-DD HH:MM):", None),
+            ("return_time", "Return Time (YYYY-MM-DD HH:MM):", None)
+        ]
 
-        ttk.Label(self.reservation_frame, text="Car Type:").grid(row=1, column=0, padx=5, pady=5)
-        self.car_size = ttk.Combobox(self.reservation_frame, values=['sedan', 'SUV', 'Coupe', 'Truck'])
-        self.car_size.grid(row=1, column=1, padx=5, pady=5)
-
-        ttk.Label(self.reservation_frame, text="Checkout Time (YYYY-MM-DD HH:MM):").grid(row=2, column=0, padx=5, pady=5)
-        self.checkout_time = ttk.Entry(self.reservation_frame)
-        self.checkout_time.grid(row=2, column=1, padx=5, pady=5)
-
-        ttk.Label(self.reservation_frame, text="Return Time (YYYY-MM-DD HH:MM):").grid(row=3, column=0, padx=5, pady=5)
-        self.return_time = ttk.Entry(self.reservation_frame)
-        self.return_time.grid(row=3, column=1, padx=5, pady=5)
+        self.entries = {}
+        for i, (key, label, values) in enumerate(fields):
+            ttk.Label(self.reservation_frame, text=label).grid(row=i, column=0, padx=5, pady=5, sticky='e')
+            if values:
+                entry = ttk.Combobox(self.reservation_frame, values=values)
+            else:
+                entry = ttk.Entry(self.reservation_frame)
+            entry.grid(row=i, column=1, padx=5, pady=5, sticky='we')
+            self.entries[key] = entry
 
         submit_button = ttk.Button(self.reservation_frame, text="Submit Reservation", command=self.submit_reservation)
-        submit_button.grid(row=4, column=1, padx=5, pady=5)
+        submit_button.grid(row=len(fields), column=1, padx=5, pady=5)
+
+        self.reservation_frame.columnconfigure(1, weight=1)
 
     def load_drivers(self):
         self.cursor.execute("SELECT Driver_id FROM Drivers")
-        drivers = [row[0] for row in self.cursor.fetchall()]
-        self.driver_id['values'] = drivers 
+        return [row[0] for row in self.cursor.fetchall()]
 
     def refresh_reservations(self):
-        for i in self.tree.get_children():
-            self.tree.delete(i)
-
-        self.cursor.execute("""
+        self.tree.delete(*self.tree.get_children())
+        query = """
         SELECT r.Reservation_id, d.Driver_Name, c.Car_id, r.Checkout_time, r.Return_time, r.Price
         FROM Reservations r
         JOIN Drivers d ON r.Driver_id = d.Driver_id
         JOIN Cars c ON r.Car_id = c.Car_id
-        """)
+        """
+        self.cursor.execute(query)
         for row in self.cursor.fetchall():
-            self.tree.insert('', 'end', values=row)
+            self.tree.insert('', 'end', values=tuple(row))
 
     def submit_reservation(self):
-        driver_id = self.driver_id.get()
-        car_size = self.car_size.get()
-        checkout_time = self.checkout_time.get()
-        return_time = self.return_time.get()
+        data = {key: entry.get() for key, entry in self.entries.items()}
 
-        if not all([driver_id, car_size, checkout_time, return_time]):
+        if not all(data.values()):
             messagebox.showerror('Error', 'All fields need to be filled.')
             return
         
         try:
-            checkout = datetime.strptime(checkout_time, "%Y-%m-%d %H:%M")
+            checkout = datetime.strptime(data['checkout_time'], "%Y-%m-%d %H:%M")
             if checkout < datetime.now() + timedelta(hours=24):
                 messagebox.showerror("Error", "Reservation has to be booked 24hrs prior.")
                 return
@@ -97,7 +101,7 @@ class CarRental:
             messagebox.showerror('Error', "Invalid format of Date and Time.")
             return
 
-        self.cursor.execute("SELECT Car_id FROM Cars WHERE Car_size_type = ? AND Car_reserved IS NULL LIMIT 1", (car_size,))
+        self.cursor.execute("SELECT Car_id FROM Cars WHERE Car_size_type = ? AND Car_reserved IS NULL LIMIT 1", (data['car_type'],))
         available_car = self.cursor.fetchone()
 
         if not available_car:
@@ -106,25 +110,37 @@ class CarRental:
 
         car_id = available_car[0]
 
-        # Price calculation
-        duration = datetime.strptime(return_time, "%Y-%m-%d %H:%M") - checkout
+        duration = datetime.strptime(data['return_time'], "%Y-%m-%d %H:%M") - checkout
         price = duration.days * 100 + duration.seconds // 3600 * 5
-        # Daily rate-100. Hourly rate -5.
 
-        # Submit Reservation
         reservation_id = f"RES{datetime.now().strftime('%Y%m%d%H%M%S')}"
-        self.cursor.execute("""
-        INSERT INTO Reservations (Reservation_id, Driver_id, Car_id, Size, Checkout_time, Return_time, Price)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """, (reservation_id, driver_id, car_id, car_size, checkout_time, return_time, str(price)))
+        
+        try:
+            self.cursor.execute("""
+            INSERT INTO Reservations (Reservation_id, Driver_id, Car_id, Size, Checkout_time, Return_time, Price)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (reservation_id, data['driver_id'], car_id, data['car_type'], data['checkout_time'], data['return_time'], str(price)))
             
-        # Update car status
-        self.cursor.execute("UPDATE Cars SET Car_reserved = 'Yes' WHERE Car_id = ?", (car_id,))
+            self.cursor.execute("UPDATE Cars SET Car_reserved = 'Yes' WHERE Car_id = ?", (car_id,))
             
-        self.conn.commit()
+            self.conn.commit()
+        except sqlite3.Error as e:
+            messagebox.showerror("Database Error", str(e))
+            return
 
-        messagebox.showinfo("Done", "Reservation made.")
+        messagebox.showinfo("Success", "Reservation made successfully.")
         self.refresh_reservations()
+
+    def cleanup_reservations(self):
+        if messagebox.askyesno("Confirm", "Are you sure you want to delete all reservations?"):
+            try:
+                self.cursor.execute("DELETE FROM Reservations")
+                self.cursor.execute("UPDATE Cars SET Car_reserved = NULL")
+                self.conn.commit()
+                messagebox.showinfo("Success", "All reservations have been deleted")
+                self.refresh_reservations()
+            except sqlite3.Error as e:
+                messagebox.showerror("Database Error", str(e))
 
 if __name__ == "__main__":
     root = tk.Tk()
